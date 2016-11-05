@@ -1,79 +1,83 @@
-#!/bin/bash -xe
+#!/bin/sh
 
-##################################################################################
-function usage(){
-  echo "usage: $(basename $0) /path/to/jenkins_home archive.tar.gz"
-}
-##################################################################################
-
-readonly JENKINS_HOME=$1
-readonly DEST_FILE=$2
 readonly CUR_DIR=$(cd $(dirname ${BASH_SOURCE:-$0}); pwd)
-readonly TMP_DIR="$CUR_DIR/tmp"
-readonly ARC_NAME="jenkins-backup"
-readonly ARC_DIR="$TMP_DIR/$ARC_NAME"
-readonly TMP_TAR_NAME="$TMP_DIR/archive.tar.gz"
 
-if [ -z "$JENKINS_HOME" -o -z "$DEST_FILE" ] ; then
-  usage >&2
-  exit 1
+
+JENKINS_HOME=/var/jenkins_home
+DEST_FILE=$CUR_DIR/jenkins-backup-$(date "+%Y.%m.%d-%H.%M.%S").tar.gz
+
+usage() {
+  cat <<-END
+	usage: $(basename $0) [-j JENKINS_HOME] [-b BACKUP_FILE]
+
+	optional arguments:
+	    -h, --help  show this help message and exit
+	    -j DIR, --jenkins-home  DIR
+	                Jenkins home directory.
+	                Default is $JENKINS_HOME
+	    -b FILE, --backup-file  FILE
+	                output backup archive file.
+	                Default is $DEST_FILE
+
+
+	END
+
+}
+
+GETOPT_OUTPUT=$(getopt -o "hj:b:" --long "help,jenkins-home:,backup-file:" -- "$@")
+if [ $? -gt 0 ] ; then
+	usage
+	exit 1
 fi
-
-rm -rf "$ARC_DIR" "$TMP_TAR_NAME"
-for i in plugins jobs users secrets nodes;do
-  mkdir -p "$ARC_DIR"/$i
+eval set -- "$GETOPT_OUTPUT"
+ 
+while true ; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -j|--jenkins-home)
+      JENKINS_HOME=$2
+      shift 2
+      ;;
+    -b|--backup-file)
+      DEST_FILE$2
+      shift 2
+      ;;
+    --) shift ; break ;;
+    *)
+      echo "Command line parsing internal error!"
+      usage
+      exit 1
+      ;; 
+  esac
 done
 
-cp "$JENKINS_HOME/"*.xml "$ARC_DIR"
-
-cp "$JENKINS_HOME/plugins/"*.[hj]pi "$ARC_DIR/plugins"
-hpi_pinned_count=$(find $JENKINS_HOME/plugins/ -name *.hpi.pinned | wc -l)
-jpi_pinned_count=$(find $JENKINS_HOME/plugins/ -name *.jpi.pinned | wc -l)
-if [ $hpi_pinned_count -ne 0 -o $jpi_pinned_count -ne 0 ]; then
-  cp "$JENKINS_HOME/plugins/"*.[hj]pi.pinned "$ARC_DIR/plugins"
-fi
-
-if [ "$(ls -A $JENKINS_HOME/users/)" ]; then
-  cp -R "$JENKINS_HOME/users/"* "$ARC_DIR/users"
-fi
-
-if [ "$(ls -A $JENKINS_HOME/secrets/)" ] ; then
-  cp -R "$JENKINS_HOME/secrets/"* "$ARC_DIR/secrets"
-fi
-
-if [ "$(ls -A $JENKINS_HOME/nodes/)" ] ; then
-  cp -R "$JENKINS_HOME/nodes/"* "$ARC_DIR/nodes"
-fi
-
-function backup_jobs {
-  local run_in_path=$1
-  local rel_depth=${run_in_path#$JENKINS_HOME/jobs/}
-  cd "$run_in_path"
-  find . -maxdepth 1 -type d | while read job_name ; do
-    [ "$job_name" = "." ] && continue
-    [ "$job_name" = ".." ] && continue
-    [ -d "$JENKINS_HOME/jobs/$rel_depth/$job_name" ] && mkdir -p "$ARC_DIR/jobs/$rel_depth/$job_name/"
-    find "$JENKINS_HOME/jobs/$rel_depth/$job_name/" -maxdepth 1 -name "*.xml" -print0 | xargs -0 -I {} cp {} "$ARC_DIR/jobs/$rel_depth/$job_name/"
-    if [ -f "$JENKINS_HOME/jobs/$rel_depth/$job_name/config.xml" ] && [ "$(grep -c "com.cloudbees.hudson.plugins.folder.Folder" "$JENKINS_HOME/jobs/$rel_depth/$job_name/config.xml")" -ge 1 ] ; then
-      #echo "Folder! $JENKINS_HOME/jobs/$rel_depth/$job_name/jobs"
-      backup_jobs "$JENKINS_HOME/jobs/$rel_depth/$job_name/jobs"
-    else
-      true
-      #echo "Job! $JENKINS_HOME/jobs/$rel_depth/$job_name"
-    fi 
-  done
-  #echo "Done in $(pwd)"
-  cd -
+readonly SCRATCH=$(mktemp -t tmp.XXXXXXXXXX)
+on_exit() {
+  rm -rf "$SCRATCH"
 }
+trap on_exit INT TERM HUP EXIT
+
+if [ ! -d "$JENKINS_HOME" ]; then
+  (>&2 echo "$JENKINS_HOME does not exist!")
+  exit 1000
+fi
+
+set -e 
+
+find "$JENKINS_HOME" -maxdepth 1 -type f -print >> $SCRATCH
+find "$JENKINS_HOME" -name ".ssh" -maxdepth 1 -type d -print >> $SCRATCH
+find "$JENKINS_HOME/plugins/" -name "*.[hj]pi" -maxdepth 1 -type f -print >> $SCRATCH
+find "$JENKINS_HOME/plugins/" -name "*.[hj]pi.pinned" -maxdepth 1 -type f -print >> $SCRATCH
+find "$JENKINS_HOME" -name "users" -maxdepth 1 -type d -print >> $SCRATCH
+find "$JENKINS_HOME" -name "secrets" -maxdepth 1 -type d -print >> $SCRATCH
+find "$JENKINS_HOME" -name "nodes" -maxdepth 1 -type d -print >> $SCRATCH
 
 if [ "$(ls -A $JENKINS_HOME/jobs/)" ] ; then
-  backup_jobs $JENKINS_HOME/jobs/
+  find "$JENKINS_HOME/jobs" -type f -not -path "*/builds/*" -print >> $SCRATCH
 fi
 
-cd "$TMP_DIR"
-tar -czvf "$TMP_TAR_NAME" "$ARC_NAME/"*
-cd -
-mv -f "$TMP_TAR_NAME" "$DEST_FILE"
-rm -rf "$ARC_DIR"
 
-exit 0
+tar -czvf $DEST_FILE -T $SCRATCH
